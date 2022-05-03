@@ -705,21 +705,177 @@ In this tutorial, we will make use of both components, though you can adapt the 
 
 <br>
 
+So far in the tutorial, we have not been able to persist data beyond a server restart since all our POST operations just updated data structures in memory. Not we will change that by bringing in a relational database. We'll use `SQLite` because it requires minimal setup so it's useful for learning. With very minor config modifications you can use the same approach for other relational database management systems (RDBMS) such as PostgreeSQL or MySQL.
 
+In the `tutorial repo` open up the part-7 directory. You'll notice that there are a number of new directories compared to previous parts of the tutorial:
 
+~~~
+.
+├── alembic                    ----> NEW
+│  ├── env.py
+│  ├── README
+│  ├── script.py.mako
+│  └── versions
+│     └── 238090727082_added_user_and_recipe_tables.py
+├── alembic.ini                ----> NEW
+├── app
+│  ├── __init__.py
+│  ├── backend_pre_start.py    ----> NEW
+│  ├── crud                    ----> NEW
+│  │  ├── __init__.py
+│  │  ├── base.py
+│  │  ├── crud_recipe.py
+│  │  └── crud_user.py
+│  ├── db                      ----> NEW
+│  │  ├── __init__.py
+│  │  ├── base.py
+│  │  ├── base_class.py
+│  │  ├── init_db.py
+│  │  └── session.py
+│  ├── deps.py                 ----> NEW
+│  ├── initial_data.py
+│  ├── main.py
+│  ├── models                  ----> NEW
+│  │  ├── __init__.py
+│  │  ├── recipe.py
+│  │  └── user.py
+│  ├── recipe_data.py
+│  ├── schemas
+│  │  ├── __init__.py
+│  │  ├── recipe.py
+│  │  └── user.py
+│  └── templates
+│     └── index.html
+├── poetry.lock
+├── prestart.sh
+├── pyproject.toml
+├── README.md
+└── run.sh
+~~~
 
+We'll go through all of these additions in this post, and by the end you'll understand how all the new modules work together to enable not just a one-time database integration, but also migrations as we update our database schemas. More on that soon.
 
+<br>
 
+### FastAPI SQLAlchemy Diagram
 
+<br>
 
+The overall diagram of what we're working towards looks like this:
 
+![SQLAlchemy Diagram](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-7/diagram-overall.jpeg)
 
+<br>
 
+To start off, we will look at the ORM and Data Access Layers:
 
+![ORM and Data Access Layers](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-7/sqlalchemy-diagram-orm.jpeg)
 
+<br>
 
+For now, let's turn our attention to the new `db` directory.
 
+We want to define tables and columns from our Python classes using the ORM. In SQLAlchemy, this is enabled through a `declarative mapping`. The most common pattern is constructing a base class using the SQLAlchemy `declarative_base`  function, and then having all DB model classes inherit from this base class.
 
+We create this base class in the `db/base_class.py` module:
+
+~~~
+import typing as t
+
+from sqlalchemy.ext.declarative import as_declarative, declared_attr
+
+class_registry: t.Dict = {}
+
+@as_declarative(class_registry=class_registry)
+class Base:
+    id: t.Any
+    __name__: str
+
+    #Generate __tablename__ automatically
+    @declared_attr
+    def __tablename__(cls) -> str:
+        return cls.__name__.lower()
+
+~~~
+
+In other codebases/exxamples you may have seen this done like so:
+
+~~~
+Base = declarative_base()
+~~~
+
+In our case, we're doing the same thing but with a decorator (provided by SQLAlchemy) so that we can declare some helper methods on our `Base` class - like automatically generating a `__tablename__`.
+
+Having done that, we are now free to define the tables we need for our API. So far we've worked with some toy recipe data stored in memory:
+
+~~~
+RECIPES = [
+    {
+        "id": 1,
+        "label": "Chicken Vesuvio",
+        "source": "Serious Eats",
+        "url": "http://www.seriouseats.com/recipes/2011/12/chicken-vesuvio-recipe.html",
+    },
+    {
+        "id": 2,
+        "label": "Chicken Paprikash",
+        "source": "No Recipes",
+        "url": "http://norecipes.com/recipe/chicken-paprikash/",
+    },
+    {
+        "id": 3,
+        "label": "Cauliflower and Tofu Curry Recipe",
+        "source": "Serious Eats",
+        "url": "http://www.seriouseats.com/recipes/2011/02/cauliflower-and-tofu-curry-recipe.html",
+    },
+]
+~~~
+
+Therefore the first table we want to define is a `recipe` table that will store the data above. We define this table via the ORM in `models/recipe.py`:
+
+~~~
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import relationship
+
+from app.db.base_class import Base
+
+class Recipe(Base): #[1]
+    id = Column(
+        Integer, 
+        primary_key=True, 
+        index=True,
+    ) #[2]
+    label = Column(
+        String(256),
+        nullable=False,
+    )
+    url = Column(
+        String(256), 
+        index=True, 
+        nullable=True
+    )
+    source = Column(
+        String(256), 
+        nullable=True
+    )
+    submitter_id = Column(
+        String(10), 
+        ForeignKey("user.id"), 
+        nullable=True,
+    ) #[3]
+    submitter = relationship(
+        "User",
+        back_populates="recipes",
+    ) #[4]
+
+~~~
+
+Let's break this down:
+
+1. We represent our database `recipe` table with a Python class, which inherits from the `Base` class we defined earlier (this allows SQLAlchemy to detect and map the class to a database table).
+2. Every column of the `recipe` table (e.g. `id`,`label`) is defined in the class, setting the column type with SQLAlchemy types like `Integer` and `String`.
+3. We define a `one-to-many relationship` between a recipe and user (which we refer to as "submitter"), via the SQLAlchemy `ForeignKey` class.
+4. To establish a bidirectional relationship in one-to-many, where the "reverse" side is a many to one, we specify an additional `relationship()` and connect the two using the `relationship.back_populates` parameter.
 
 
 
