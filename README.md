@@ -877,8 +877,86 @@ Let's break this down:
 3. We define a `one-to-many relationship` between a recipe and user (which we refer to as "submitter"), via the SQLAlchemy `ForeignKey` class.
 4. To establish a bidirectional relationship in one-to-many, where the "reverse" side is a many to one, we specify an additional `relationship()` and connect the two using the `relationship.back_populates` parameter.
 
+<br>
 
+As you can infer from the foreign key, we will also need to define a `user` table, since we want to be able to attribute the recipes to users. A user table will set us up for doing auth in later parts of the tutorial.
 
+Our `user` table is defined in `models/user.py`, and follows a similiar structure:
+
+~~~
+class User(Base):
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+    firt_name = Column(
+        String(256),
+        nullable=True,
+    )
+    surname = Column(
+        String(256),
+        nullable=True,
+    )
+    email = Column(
+        String,
+        index=True,
+        nullable=False,
+    )
+    is_superuser = Column(
+        Boolean,
+        default=False
+    )
+    recipes = relatioship(
+        "Recipe",
+        cascade="all, delete-orphan",
+        back_populates="submitter",
+        uselist=True,
+    )
+~~~
+
+<br>
+
+Great, we have define our tables. Now what? Well, we haven't yet told SQLAlchemy how to connect to the DB (e.g. what is the database colled, how do we connect to it, what flavor of SQL is it). All this happens in the `SQLAlchemy Engine class`.
+
+We instantiate an engine in the `/db/session.py` module:
+
+~~~
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+
+SQLACHEMY_DATABSE_URI = "sqlite:///example.db" [#1]
+
+engine = create_engine( #[2]
+    SQLACHEMY_DATABASE_URI,
+    # required for sqlite
+    connect_args = {
+        "check_same_thread": False
+    },
+)
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine #[4]
+)
+~~~
+
+<br>
+
+1. The `SQLACHEMY_DATABASE_URI` defines the file where SQLite will persist data.
+2. Via the SQLAlchemy `create_engine` function we instantiate our engine, passing in the DB connection URI - note that this connection string can be much more complex and include drivers, dialects, database server locations, users, passwords and ports.
+3. The `check_same_thread: False ` config is necessary to work with SQLite - this is a common gotcha because FastAPI can access the database with multiple threads during a single request, so SQLite needs to be configured to allow that.
+4. Finally we also create a DB `Session`, which (unlike the engine) is ORM - specific. When working with the ORM, the session object is our main access point to the database.
+
+<br>
+
+From `the SQLAlchemy Session docs:`
+
+> In the most general sense, the Session establishes all conversations with the database and represents a "holding zone" for all the objects which you've loaded or associated with it during its lifespan.
+
+<br>
+
+We are making progress! Next, we will once again turn to Pydantic `which we looked at in part 4` to make it very easy to get our Python code into the right shape for database operations.
 
 
 
