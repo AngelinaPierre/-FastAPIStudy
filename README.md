@@ -959,6 +959,442 @@ From `the SQLAlchemy Session docs:`
 We are making progress! Next, we will once again turn to Pydantic `which we looked at in part 4` to make it very easy to get our Python code into the right shape for database operations.
 
 
+<br>
+
+### Pratical Section 2 - Pydantic DB Schemas and CRUD Utilities
+
+<br>
+
+Now let's look at the FastAPI app endpoint logic, specifically the Pydantic DB schemas and CRUD utilities:
+
+![ Pydantic DB schemas and CRUD utilities](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-7/sqlalchemy-pydantic.jpeg)
+
+For those alreadu used to SQLAlchemy and other Python web frameworks like Django or Flask, this part will probably contain something a little different to what you might be used to. Let's zoom in on the diagram:
+
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-7/zoomed-pydantic-crud-logic.jpeg)
+
+The key sequencing to understand is that as REST API requests which will require interaction with the database come in, the following occurs:
+- The request is routed to the correct path operation (i.e. the function for handling it, such as our `root` function in `main`` py file).
+- The relevant Pydantic model is used to validate incoming request data and construct the appropriate data structure to be passed to the CRUD utilities.
+- Our CRUD utility functions use a combination of the ORM Session and the shaped data structures to prepare DB queries.
+
+Don’t worry if this isn’t entirely clear yet, we’ll go through each step and by the end of this blog post have brought everything together.
+
+We will create Pydantic models for reading/writing data from our various API endpoints. The terminology can get confusing because we have SQLAlchemy models which look like this
+
+> `name = Column(String)`
+
+and Pydantic models which look like this:
+
+>`name: str`
+
+To help distinguish the two, we tend to keep the Pydantic classes in the `schemas` directory.
+
+Let's look at the `schemas/recipe.py` module:
+
+~~~
+from pydantic import BaseModel, HttpUrl
+from typing import Sequence
+
+class RecipeBase(BaseModel):
+    label: str
+    source: str
+    url: HttpUrl
+
+class RecipeCreate(RecipeBase):
+    label: str
+    source: str
+    url: HttpUrl
+    submitter_id: int
+
+class RecipeUpdate(RecipeBase):
+    label: str
+
+# Properties shared by models stored in DB
+class RecipeInDBBase(RecipeBase):
+    id: int
+    submitter_id: int
+
+    class Config:
+    orm_module = True
+
+# Properties to return to client
+class Recipe(RecipeInDBBase):
+    pass
+
+# Properties properties stored in DB
+class RecipeInDB(RecipeInDBBase):
+    pass
+~~~
+
+<br>
+
+Some of these classes, like `Recipe` and `RecipeCreate` existed in previous parts of the tutorial( int the old `schema.py` module), others such as those classes referencing the DB, are new.
+
+Pydantic's `orm_mode` (which you can see in `RecipeInDBBase`) will tell the Pydantic model to read the data even if it is not a dict, but an ORM model (or any other arbitrary object with attributes). Without `orm_mode`, if you returned a SQLAlchemy model from your path operation, it wouldn't include the relationship data.
+
+> Why make the distinction between a `Recipe` and `RecipeInDB`? This allows us in future to separate fields which are only relevant for the DB, or which we don't want to return to the client (such as a password field).
+
+As we saw in the diagram, it's not enough to just have the Pydantic schemas. We also need some reusable functions to interact with the database. This will be our data access layer, and by FastAPI convention, these utility classes are defined in the `crud` directory.
+
+These CRUD utility classes help us to do things like:
+- Read from a table by ID
+- Read from a table by a particular attribute (e.g. by user email)
+- Read multiple entries from a table (defining filters and limits)
+- Insert new rows into a table
+- Delete a row in a table
+
+Each table gets its own CRUD class, which inherits reusable parts from a base class. Let's examine this now in `crud/base.py`.
+
+~~~
+from typing import Any, Dict, Generic, List, Optional, Type, TypeVar, Union
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel
+from sqlaclhemy.orm import Session
+
+from app.db.base_class import Base
+
+ModelType = TypeVar("ModelType", bound=Base)
+CreateSchemaType = TypeVar("CreateSchemaType", bound=BaseModel)
+UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
+
+class CRUDBase(Generic[ModelType, CreateSchemaType. UpdateSchemaType]): #[1]
+    def __init__(
+        self, model: Type[ModelType] #[2]
+        """
+        CRUD object with default methods to Create, Read, Update, Delete (CRUD).
+        **Parameters**
+        * `model`: A SQLAlchemy model class
+        * `schema`: A Pydantic model (schema) class
+        """
+        self.model = model
+
+        def get(
+            self,
+            db: Session,
+            id: Any,
+        ) -> Optional[ModelType]:
+            return db.query(self.model).filter(self.model.id == id).first() #[3]
+        
+        def get_multi(
+            self,
+            db: Session,
+            *,
+            skip: int = 0,
+            limit: int = 100,
+        ) -> List[ModelType]:
+            return db.query(self.model)offset(skip).limit(limit).all() #[4]
+        
+        def create(
+            self, 
+            db: Session,
+            *,
+            obj_in: CreateSchemaType,
+        ) -> ModelType:
+            obj_in_data = jsonable_encoder(obj_in)
+            db_obj = self.model(**obj_in_data) # type: ignore
+            db.add(db_obj)
+            db.commit() #[5]
+            db.refresh(db_obj)
+            return db_obj
+    )
+~~~
+
+<br>
+
+This is one of the trickier bits of code in this part of the tutorial, let's break it down:
+
+1. Models inheriting from `CRUDBase`will be defined with a `SQLAlchemy model` as the firts argument, the the `Pydantic model` (aka schema) for creating and updating rows as the second and third arguments.
+2. When instantiating the CRUD class, it expects to be passed the relevant SQLAlchemy model (we'll look at this in a moment).
+3. Here are the actual DB queries you have probably been expecting - we use the ORM Session (`db`).query method to chain together different DB queries. These can be as simple or complex as we need. `See the SQLAlchemy documentation on queries`. In this example we filter by ID, allowing us to fetch a single row from the database.
+4. Another DB query, this time we fetch multiple database rows by querying and chaining the `.offset` and `.limit` methods, and finishing with `.all()`
+5. When creating Db objects, it is necessary to run the session `commit` method (see docs) to complete the row insertion. We'll be looking at tradeoffs to having the commit call here vs. in the endpoint later in the tutorial series (in the Python 3 asyncio and performance blog post).
+
+<br>
+
+Now that we've defined the `CRUDBase` we can use that to define `crud` utilities for each table. The code for these subclasses is much simpler, with the majority of the logic inherited from the base class:
+
+~~~
+from app.crud.base import CRUDBase
+from app.models.recipe import Recipe
+from app.schemas.recipe import RecipeCreate, RecipeUpdate
+
+class CRUDRecipe(CRUDBase[Recipe, RecipeCreate, RecipeUpdate]): #[1]
+    ...
+recipe = CRUDRecipe(Recipe) #[2]
+~~~
+
+<br>
+
+1. The class is defined with the relevant SQLAlchemy `Recipe` model, followed by the Pydantic `RecipeCreate` and `RecipeUpdate` schemas.
+2. We instantiate the `CRUDRecipe` class
+
+<br>
+
+Don't worry if this seems a bit abstract at the moment. In the last part of this post, show this being used in the endpoints so can see (and run locally) the API endpoints interacting with the DB, and how the Pydantic schemas and CRUD utilities will work together. However, before we get there, we need to handle the initial creation of the DB, as well as future migrations.
+
+
+<br>
+
+### Pratical Section 3 - Enabling Migrations with Alembic
+
+<br>
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-7/diagram-alembic.jpeg)
+
+<br>
+
+The goal of this tutorial is to build a production-ready API, and you simply can't setup a database without considering how to make changes to your tables over time. A common solution for this challenge is the `alembic library`, which is designed to work with SQLAlchemy.
+
+Recall our new part-7 file tree:
+
+~~~
+.
+├── alembic                    ----> NEW
+│  ├── env.py
+│  ├── README
+│  ├── script.py.mako
+│  └── versions
+│     └── 238090727082_added_user_and_recipe_tables.py
+├── alembic.ini                ----> NEW
+├── app
+...etc.
+~~~
+
+The alembic directory contains a few files we'll be using:
+- `[ env.py ]` -> where we pass in configuration (such as our database connection string, config required to create a SQLAlchemy engine, and ou SQLAlchemy `Base` declarative mapping class). 
+- `[ versions ] ` -> A directory containing each migration to be run. Every file within this directory represents a DB migration, and contains a reference to previous/next migrations so they are always run in the correct sequence.
+- `[ script.py.mako ]` -> boilerplate generated by alembic.
+- `[ README ]` -> boilerplate generated by alembic.
+- `[ alembic.ini ]` -> Tells alembic where to look for the other files, as well as setting up config for logging.
+
+In order to trigger the alembic migrations, you run the `alembic upgrade head command`. When you make any change to a database table, you capture that change by running `alembic revision --autogenerate -m "Some description" ` - this will generate a new file in the `versions` directory which you should always check.
+
+For our recipe API, we've wrapped this migration command in the `prestart.sh` bash script:
+
+~~~
+#! /usr/bin/env bash
+
+#Let the DB start
+python ./app/backend_pre_start.py
+
+# Run migrations
+alembic upgrade head <----- ALEMBIC MIGRATION COMMAND
+
+# Create initial data in DB
+python ./app/initial_data.py
+~~~
+<br>
+
+Running the alembic migrations will not only apply changes to the database, but also create the tables and columns in the first place. This is why you don't find any table creation command like `Base.metadata.create_all(bind=engine)` which you'll often find in tutorials that don't cover migrations.
+
+You'll also notice that we also have a couple of other scripts in our `prestart.sh` script:
+- `[ backend_pre_start.py ]` -> which simply executes a SQL `SELECT 1` query to check our DB is working.
+- `[ initial_data.py ]` -> which uses the `init_db` function from `db/init_db.py` which we will breakdown further now
+
+<br>
+
+`db/init_db.py`
+~~~
+from app import crud, schemas
+from app.db import base # noqa: F401
+from app.recipe_data import RECIPES
+
+logger = logging.getLogger(__name__)
+FIRST_SUPERUSER = "admin@recipeapi.com"
+
+def init_db(db: Session) -> None: #[1]
+    if FIRST_SUPERUSER:
+        user = crud.user.get_by_email(
+            db,
+            email=FIRST_SUPERUSER
+        ) #[2]
+        if not user:
+            user_in = schemas.UserCreate(
+                full_name="Initial Super User",
+                email=FIRST_SUPERUSER,
+                is_superuser=True,
+            )
+            user = crud.user.create(
+                db,
+                obj_in=user_in
+            )
+        else:
+            logger.warning(
+                "Skipping creating superuser. User with email "
+                f"{FIRST_SUPERUSER} already exists. "
+            )
+        if not user.recipes:
+            for recipe in RECIPES:
+                recipe_in = schemas.RecipeCreate(
+                    label=recipe["label"],
+                    source=recipe["source"],
+                    url=recipe["url"],
+                    submitter_id=user.id,
+                )
+                crud.recipe.create(
+                    db,
+                    obj_in=recipe_in #[3]
+                )
+~~~
+<br>
+
+1. The `init_db` function takes as its only argument a SQLAlchemy `Session` object, which we can import from our `db/session.py`.
+2. Then we make use of the `crud` utility functions that we created earlier in this part of the tutorial to fetch or create a user. We need a user so that we can assign a `submitter` to the initial recipes (recall the foreign key lookup from the recipe table to the user table).
+3. We iterate over the recipes hardcoded in the `app/recipe_data.py RECIPE` list of dictionaries, use that data to create a series of Pydantic `RecipeCreate` schemas, which we can then pass to the `crud.recipe.create` function to `INSERT` rows into the database.
+
+<br>
+
+Give this a try in your cloned copy:
+~~~
+cd into the part-7 directory
+pip install poetry
+run poetry install to install the dependencies
+run poetry run ./prestart.sh
+~~~
+
+In the terminal, you should see migrations being applied. You should also see a new file created: part-7-database/example.db. This is the SQLite DB, check it by running:
+
+- Install sqlite3
+- run the command sqlite3 example.db
+- run the command .tables
+  
+You should see 3 tables: alembic_version, recipe, and user. Check the initial recipe data has been created with a simple SQL query: SELECT * FROM recipe;
+
+You should see 3 recipe rows in the sqlite DB:
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-7/sqlite-commands.png)
+
+You can exit the SQLite3 shell with the command `.exit`
+
+Great! All that remains now is to bring everything together in our API endpoints.
+
+<br>
+
+### Pratical Section 4 - Putting it all Together in Our API Endpoints
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-7/diagram-path-operations.jpeg)
+
+<br>
+
+If you look at app/main.py you'll find all the endpoints functions have been updated to take an additional `db` argument:
+
+~~~
+from fastapi import Request, Depends
+#skipping..
+
+@api_router.get("/", status_code=200)
+def root(
+    request: Request,
+    db: Session = Depends(deps.get_db),
+) -> dict:
+    """
+    Root GET
+    """
+    recipes = crud.recipe.get_multi(db = db, limit = 10)
+    return TEMPLATES.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "recipes": recipes
+        },
+    )
+    #skipping..
+~~~
+<br>
+
+This is a first look at FasAPI's powerful `dependency injection capabilities`, which for my money is one of the frameworks best features. Dependency Injection (DI) is a way for your functions and classes to declare things they need to work (in a FastAPI context, usually our endpoint functions which are called `path operation functions`).
+
+We'll be exploring dependecy injection in much more detail later in the turorial. For now, what you need to appreciate is that the FastAPI `Depends` class is used in our function parameters like so:
+
+~~~
+db: Session = Depends(deps.get_db)
+~~~
+
+And what we pass into `Depends` is a function specifying the dependency. In this part of the tutorial, we've added these functions in the `deps.py` module:
+
+~~~
+from typing import Generator
+
+from app.db.session import SessionLocal #[1]
+
+def get_db() -> Generator:
+    db = SessionLocal() #[2]
+    try:
+        yield db #[3]
+    finally:
+        db.close() #[4]
+~~~
+
+<br>
+
+Quick breakdown:
+
+1. We import the ORM session class `SessionLocal` from `app/db/session.py`
+2. We instantiate the session
+3. we `yield` the session, which returns a generator. Why do this? well, the yield statement suspends the function's execution and sends a value back to the caller, but retains enough state to enable the function to resume where it is left off. In short, it's an efficient way to work with our database connection. `Python generators primer for those unfamiliar`.
+4. We make sure we close the DB connection by using the `finally` clause of the `try` block - meaning that the DB session is always `closed`. This releases connection objects associated with the session and leaves the session ready to be used again.
+
+<br>
+
+OK, now understand how our DB session is being made available in our various endpoints. Let's look at more complex example:
+
+~~~
+@api_router.get("/recipe/{recipe_id}", status_code=200, response_model=Recipe) #[1]
+def fetch_recipe(
+    *,
+    recipe_id: int,
+    db: Session = Depends(deps.get_db),
+) -> Any:
+    """
+    Fetch a single recipe by ID
+    """
+    result = crud.recipe.get(db = db, id = recipe_id) #[2]
+    if not result:
+        # the exception is raised, not returned - you will get a validation error otherwise
+        raise HTTPException(
+            status_code=404,
+            detail=f"Recipe with ID {recipe_id} not found",
+        )
+        return result
+~~~
+<br>
+
+Notice the following changes:
+
+1. The `response_model=Recipe` now refers to our updated Pydantic `Recipe` model, meaning that it will work with our ORM calls.
+2. We use the `crud` utility function to get a recipe by id, passing in the `db` session object we specified as a dependency to the endpoint.
+
+<br>
+
+The extra `crud` utilities took a bit more time to understand - but can you see how now we have an elegant separation of concerns - no need for any DB queries in the endpoint code, it's all handled within our CRUD utitility functions.
+
+We see a similar pattern in the other endpoints, swapping ou `crud.recipe.get` for `crud.recipe.get_multi` when we're returning multiple recipes and `crud.recipe.create` when we create new recipes in the POST endpoint.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
