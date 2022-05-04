@@ -1,6 +1,6 @@
 [WINDOWS]: Run the FastAPI server via poetry with the Python command: `poetry run python app/main.py` Open http://localhost:8001/
 
-## Part 1 Local Setup
+## Part 1 Local Setup 
 
 ~~~
 from fastapi import FastAPI, APIRouter
@@ -425,7 +425,7 @@ class RecipeCreate(BaseModel):
 [Pydantic offers extremely granular validators](https://pydantic-docs.helpmanual.io/usage/validators/)
 
 
-## Part 5 Basic Error Handling
+## Part 5 Basic Error Handling 
 
 In the `app/main.py` file, you will find the following new code:
 
@@ -602,7 +602,7 @@ As a result, in this example series, we're going to use Jinja templates quite sp
 
 <br>
 
-## Part 6b Basic Deployment on Linode
+## Part 6b Basic Deployment on Linode 
 
 <br>
 
@@ -680,7 +680,7 @@ In this post, i'll show you how to use Linode for deploying your FastAPI app, in
 
 <br>
 
-## Part 7 Database Setup with SQLAlchemy and Alembic
+## Part 7 Database Setup with SQLAlchemy and Alembic 
 
 <br>
 
@@ -1372,15 +1372,126 @@ The extra `crud` utilities took a bit more time to understand - but can you see 
 
 We see a similar pattern in the other endpoints, swapping ou `crud.recipe.get` for `crud.recipe.get_multi` when we're returning multiple recipes and `crud.recipe.create` when we create new recipes in the POST endpoint.
 
+<br>
 
 
+## Part 8 - Project Structure, Settings and API Versioning
 
+<br>
 
+By structuring your FastAPI projects well, you’ll set your REST APIs up for easy extensibility and maintenance later.
 
+This is post borrows heavily from the official full-stack FastAPI postgresql cookie-cutter repo. For learning, the cookie cutter repo is a bit complex, so we’re simplifying things at this point in the series. However, by the end of the tutorial we’ll have something similar.
 
+<br>
 
+### Practical Section 1 - FastAPI Project Structure and Config
 
+<br>
 
+Let's take a look at the new additions to the app directory:
+
+~~~
+├── app
+│  ├── __init__.py
+│  ├── api                     ----> NEW
+│  │  ├── __init__.py
+│  │  ├── api_v1               ----> NEW
+│  │  │  ├── __init__.py
+│  │  │  ├── api.py            ----> NEW
+│  │  │  └── endpoints         ----> NEW
+│  │  │     ├── __init__.py
+│  │  │     └── recipe.py      ----> NEW
+│  │  └── deps.py
+│  ├── backend_pre_start.py
+│  ├── core                    ----> NEW
+│  │  ├── __init__.py
+│  │  └── config.py            ----> NEW
+│  ├── crud
+│  │  ├── __init__.py
+│  │  ├── base.py
+│  │  ├── crud_recipe.py
+│  │  └── crud_user.py
+│  ├── db
+│  │  ├── __init__.py
+│  │  ├── base.py
+│  │  ├── base_class.py
+│  │  ├── init_db.py
+│  │  └── session.py
+│  ├── initial_data.py
+│  ├── main.py                  ----> UPDATED
+│  ├── models
+│  │  ├── __init__.py
+│  │  ├── recipe.py
+│  │  └── user.py
+│  ├── schemas
+│  │  ├── __init__.py
+│  │  ├── recipe.py
+│  │  └── user.py
+│  └── templates
+│     └── index.html
+├── poetry.lock
+├── prestart.sh
+├── pyproject.toml
+├── README.md
+└── run.sh
+~~~
+
+<br>
+
+As you can see, we've added a new `api` directory. Our purpose here is to unclutter the `main.py` file and allow for API versioning, we'll look at that in the second (versioning) part of this blog post.
+
+We've also now added the `core/config.py` module, which is a standard FastAPI structure. We use Pydantic models in here (as we do for the schemas) to define the app condig. This allows us to make use of Pydantics type inference and validators. Let's look at the `core/config.py` code to illustrate:
+
+~~~
+from pydantic import AnyHttpUrl, BaseSettings, EmailStr, validator
+from typing import List, Optional, Union
+
+class Settings(BaseSettings): #[1]
+    API_V1_STR: str = "/api/v1" #[2]
+    # BACKEND_CORS_ORIGINS is a JSON-formatted list of origins 
+    # e.g: '["http://localhost", "http://localhost:4200", "http://localhost:3000", "http://localhost:8080", "http://local.dockertoolbox.tiangolo.com"]'
+    BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
+
+    @validator("BACKEND_CORS_ORIGINS", pre=True) #[3]
+    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
+        if isinstance(v, str) and not v.startwith("["):
+            return [i.strip() for i in v.split(",")]
+        elif isinstance(v, (list, str)):
+            return v
+        raise ValueError(v)
+    
+    SQLALCHEMY_DATABASE_URI: Optional[str] = "sqlite:///example.db"
+    FIRST_SUPERUSER: EmailStr = "admin@recipeapi.com"
+
+    class Config:
+        case_sensitive = True #[4]
+
+settings = Settings() #[5]
+~~~
+<br>
+
+1. The `settings` class inherits from the `Pydantic BaseSettings` class. This model will attempt to determine the values of any fields not passed as keyword arguments by reading from environment variables of the same name. This is why you won't see code like `API_V1_STR: str = os.environ['API_V1_STR']` because it's already doing that under the hood.
+2. As with other Pydantic models, we use type hints to validate the config - this can save us from a lot of error as config code is notoriously poorly tested.
+3. Using `Pydantic validator decorators` it's possible to validate config fields using functions.
+4. Behaviour of pydantic can be controlled via the `Config class on a model`, in this example we specify that our settings are case-sensitive.
+5. Finally we instantiate the `Settings` class so that `app.core.config.settings` can be imported throughout the project.
+
+<br>
+
+You'll see that the code for this part of the tutorial has now been updated so that all significant glocal variables are in the config (e.g. `SQLALCHEMY_DATABASE_URI` , `FIRST_SUPERUSER`).
+
+As the project grows, so too will the complexity of the config (we'll see this soon enough in future parts of the tutorial). This is a useful starting point with enough realism to give a feel for what could be here.
+
+<br>
+
+### Pratical Section 2 - API Versioning
+
+<br>
+
+It's best practice to version your APIs. This allows you to manage breaking API changes with your clients in a more disciplined and structured way. The Stripe API is the gold standard for this, if you'd `like some inspiration`.
+
+Let's start by observing the new API versioning introduced in this part of the tutorial:
 
 
 
