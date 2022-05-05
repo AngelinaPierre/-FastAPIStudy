@@ -1,12 +1,21 @@
+import asyncio
+from email import header
+from re import sub
+from typing import Any, Optional
+from urllib import response
+from webbrowser import get
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import Any, Optional
 
 from app import crud
 from app.api import deps
 from app.schemas.recipe import Recipe, RecipeCreate, RecipeSearchResults
 
+
 router = APIRouter()
+
 
 @router.get("/{recipe_id}", status_code=200, response_model=Recipe)
 def fetch_recipe(
@@ -56,3 +65,58 @@ def create_recipe(
     recipe = crud.recipe.create(db=db, obj_in=recipe_in)
 
     return recipe
+
+
+async def get_reddit_top_async(subreddit: str, data: dict) -> None:
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"http://www.reddit.com/r/{subreddit}/top.json?sort=top&t=day&limit=5",
+            headers={"User-agent": "recipe bot 0.1"},
+        )
+
+    subreddit_recipes = response.json()
+    subreddit_data = []
+    for entry in subreddit_recipes["data"]["children"]:
+        score = entry["data"]["score"]
+        title = entry["data"]["title"]
+        link = entry["data"]["url"]
+        subreddit_data.append(f"{str(score)}: {title} ({link})")
+    data[subreddit] = subreddit_data
+
+
+@router.get("/ideias/async")
+async def fetch_ideias_async() -> dict:
+    data: dict = {}
+
+    await asyncio.gather(
+        get_reddit_top_async("recipes", data),
+        get_reddit_top_async("easyrecipes", data),
+        get_reddit_top_async("TopSecretRecipes", data),
+    )
+
+    return data
+
+
+def get_reddit_top(subreddit: str, data: dict) -> None:
+    response = httpx.get(
+        f"http://www.reddit.com/r/{subreddit}/top.json?sort=top&t=day&limit=5",
+        headers={"User-agent": "recipe bot 0.1"},
+    )
+    subreddit_recipes = response.json()
+    subreddit_data = []
+    for entry in subreddit_recipes["data"]["children"]:
+        score = entry["data"]["score"]
+        title = entry["data"]["title"]
+        link = entry["data"]["url"]
+        subreddit_data.append(f"{str(score)}: {title} ({link})")
+    data[subreddit] = subreddit_data
+
+@router.get("/ideias/")
+def fetch_ideias() -> dict:
+    data: dict = {}
+    get_reddit_top("recipes", data)
+    get_reddit_top("easyrecipes", data)
+    get_reddit_top("TopSecretRecipes", data)
+
+
+    return data

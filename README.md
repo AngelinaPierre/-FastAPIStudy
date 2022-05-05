@@ -1,4 +1,8 @@
+poetry run python ./prestart.py
+
 [WINDOWS]: Run the FastAPI server via poetry with the Python command: `poetry run python app/main.py` Open http://localhost:8001/
+
+
 
 ## Part 1 Local Setup 
 
@@ -1745,6 +1749,175 @@ So far no change. Now navigate to the interactive swagger UI docs at `http://loc
 ![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-9/new-recipe-endpoints.jpeg)
 
 <br>
+
+These are two new endpoints that both do the same thing: fetch top recipes from three different subreddits and return them to the client. Obviously, this is for learning purposes, but you can imagine a scenario where our imaginary recipe API business wanted to offer API users a "recipe idea" feature.
+
+Let's have a look at the code for the non-async new endpoint: `app/api_v1/endpoints/recipe` py file.
+
+~~~
+import httpx #[1]
+
+#Skipping...
+
+def get_reddit_top(sbreddit: str, data: dict) -> None:
+    response = httpx.get(
+        f"https://www.reddit.com/r/{subreddit}/top.json?sort=top&t=day&limit=5",
+        headers = {"User-agent": "recipe bot 0.1"},
+    ) #[2]
+    subreddit_recipes = response.json()
+    subreddit_data = []
+    for entry in subreddit_recipes["data"]["children"]:
+        score = entry["data"]["score"]
+        title = entry["data"]["title]
+        link = entry["data"]["url"]
+        subreddit_data.append(f"{str(score)}: {title} ({link})")
+    data[subreddit] = subreddit_data
+
+@router.get("/ideias/")
+def fetch_ideas() -> dict:
+    data: dict = {} #[3]
+    get_reddit_top("recipes", data)
+    get_reddit_top("easyrecipes", data)
+    get_reddit_top("TopSecretRecipes", data)
+
+
+    return data
+
+# Skipping...
+
+~~~
+
+<br>
+
+Let's break this down:
+
+1. We're introducing a new library called `httpx`. This is an HTTP client similar to the `request library` which you might be more familiar with. However, unlike `requests`, `httpx`, can handle async calls, so we use it here.
+2. We make a `GET` HTTP call ro reddit, grabbing the first 5 results.
+3. The `data` dictionary is updated in each call to `get_reddit_top`, and then returned at the end of the path operation.
+
+<br>
+
+Once you get your head around the reddit API call, this sort of code should be familiar (if it's not, backtrack a few sections in the tutorial series).
+
+Now let's look at the async equivalent endpoint:
+
+`app/api_v1/endpoints/recipe.py`
+
+~~~
+import httpx
+import asyncio #[1]
+#Skipping...
+
+async def get_reddit_top_async(subreddit: str, data: dict) -> None: #[2]
+    async with httpx.AsyncClient() as client: #[3]
+        response = await client.get( #[4]
+            f"https://www.reddit.com/r/{subreddit}/top.json?sort=top&t=day&limit=5",
+            headers={"User-agent": "recipe bot 0.1"},
+        )
+    subreddit_recipes = response.json()
+    subreddit_data = []
+    for entry in subreddit_recipes["data"]["children"]:
+        score = entry["data"]["score"]
+        title = entry["data"]["title"]
+        link = entry["data"]["url"]
+        subreddit_data.append(f"{str(score)}: {title} ({link})")
+    data[subreddit] = subreddit_data
+
+@router.get("/ideias/async")
+async def fetch_ideas_async() -> dict:
+    data: dict = {}
+
+    await asyncio.gather(#[5]
+        get_reddit_top_async("recipes", data),
+        get_reddit_top_async("easyrecipes", data),
+        get_reddit_top_async("TopSecretRecipes", data),       
+    )
+
+    return data
+
+#Skipping...
+~~~
+<br>
+
+OK, let's break this down:
+
+1. Although it isn't always necessary, in this case we do need to import `asyncio`
+2. Notice the `get_reddit_top_async` function is declared with the `async` keyword, defining it as a cotoutine.
+3. `async with httpx.AsyncClient()` is the `httpx` context manager for making async HTTP calls.
+4. Each GET request is made with the `await` keyword, telling the Python that this is a point where it can suspend execution to go and do something else.
+5. We use the `asyncio.gather` to run a sequence of awaitable objects(i.e. our coroutines) concurrently.
+
+<br>
+
+Point 5 isn't shown explicitly in the FastAPI docs, since it's to do with usage of `asyncio` rather than FastAPI. But it's easy to miss that you need this kind of extra code to really leverage concurrency.
+
+In order to test our new endpoints, we'll add a small bit of middleware to track response times. `Middlewares` is a function that works on every request before it is processed by any specific `path operatation`. We'll look at more Middleware later in the tutorial series. For now you just need to know that it will time our new endpoints.
+
+In `app/main.py`
+
+~~~
+# Skipping...
+
+@app.middleware("http")
+async def add_process_time_header(resquest: Request, call_next):
+    start_time = time.time()
+    respose = await call_next(resquest)
+    process_time = time.time() - start_time
+    response.headers["X-Process-Time"] - str(process_time)
+    return response
+
+#Skipping...
+~~~
+
+<br>
+
+Great! Now let's open up our interactive API documentation at `http://localhost:8001/docs` and try out the new endpoints:
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-9/docs-try-it.jpeg)
+
+<br>
+
+When you click the `execute` button, you'll see a new addition in the response headers:
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-9/docs-response-headers.jpeg)
+
+<br>
+
+Notice the `x-process-time` header (highlighted in the screegrab above). This is how we can easily compare the times of the two endpoints. If you try both `/api/v1/recipes/ideas/async` and `/api/v1/recipes/ideas`, you should see that the `async` end point is 2-3x faster.
+
+We’ve just tapped into FastAPI’s high-performance capabilities!
+
+<br>
+
+### Notes on Async IO and Third Party Dependencies like SQLALchemy
+<br>
+
+After the euphoria of the previous section, you might be temoted to think you can just plonk `async` and `awaits` for any and every IO call to get a performance speed up. One obvious place to asume this is with database queries (another classic IO operation).
+
+Not so fast i'm afraid.
+
+Every library that you attempt to `await` needs to support async IO. Many do not. SQLAlchemy only introduced this compatibility in `version 1.4` and there are a lot of new things to factor in like:
+
+- DB drivers which support async queries
+- New query syntax
+- Creating the engine & session with new async methods
+
+We'll be looking at this later in the tutorial series in the advanced part.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
