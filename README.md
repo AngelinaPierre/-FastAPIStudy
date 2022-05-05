@@ -1493,14 +1493,258 @@ It's best practice to version your APIs. This allows you to manage breaking API 
 
 Let's start by observing the new API versioning introduced in this part of the tutorial:
 
+- Clone the tutorial `project repo`
+- `cd` into part-8
+- `pip install poetry` (if you dont have it already)
+- `poetry install`
+- `poetry run ./prestart.sh` (set up a new DB in this directory)
+- `poetry run ./run.sh`
+- Open http:://localhost:8001
+
+<br>
+
+You should be greeted by our usual server-side rendered HTML:
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-8/root-route.png)
+
+<br>
+
+So far no change. Now navigate to the interactive UI docs at `http://localhost:8001/docs`. You'll notice that the recipe endpoints now are prefaced with `/api/v1`:
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-8/versioned-api.jpeg)
+
+<br>
+
+Go ahead and have a play with the endpoints (they should all work exactlu the same as the previous part of the tutorial). We now haver versioning. Let's look at the code changes which have led to this improvement:
+
+`app/api_v1/api.py`
+
+~~~
+from fastapi import APIRouter
+
+from app.api.api_v1.endpoints import recipe
+
+api_router = APIRouter()
+api_router.include_router(recipe.router, prefix="/recipes", tags=["recipes"])
+~~~
+
+Notice how the recipe endpoint logic is pulled in from `app/api.api_v1.endpoints.recipe.py` (where we have extracted the recipe endpoint code from `app/main.py`). We then use the `include_router` method, passing in a prefix of `/recipes`. This means that endpoints defined in the `recipes.py` file which specify a route of `/` will be prefixed by `/recipes`.
+
+Then back in `app/main.py` we continue to stack the FastAPI routers:
+
+~~~
+# Skipping...
+
+root_router = APIRouter()
+app = FastAPI(title="Recipe API", openapi_url="/openapi.json")
+
+@root_router.get("/",status_code=200)
+def root(
+    request: Request,
+    db: Session = Depends(deps.get_db),
+) -> dict:
+    """
+    Root GET
+    """
+    recipes = crud.recipe.get_multi(db=db, limit=10)
+    return TEMPLATES.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "recipes": recipes
+        },
+    )
+
+app.include_router(api_router, prefix=settings.API_V1_STR) # API VERSIONING.
+app.include_router(root_router)
+
+# Skipping...
+~~~
+
+<br>
+
+Once again we use the `prefix` argument, this time with the `API_V1_STR` from our config. In short, we stack prefixes of `api/v1` (from `main.py`) the `recipes` (from `api.py`). This creats the versioned routes we see in the documentation UI.
+
+Now whenever we want to add new logic (e.g. a users API), we can simply define a new module in `app/api/api_v1/endpoints`. If we want to create a v2 API, we have a structure that allows for that.
+
+The other point to note from the above code snippet is that because we do `not` apply any versioning prefix to our root route (the home route Jinja tempalte), the this one endpoint is not versioned.
 
 
+### Links
 
 
+<br>
 
 
+## Part 9 - Asynchronous Performance Improvement
 
+<br>
 
+There are two main reasons why FastAPI is called "Fast":
+
+1. Impressive framework performance
+2. Improved developer workflow
+
+<br>
+
+In this post, we'll be exploring the performance element(1). If you're comfortable with Python's `asyncio` module, you can skip down to the practical part of the post. If not, let's talk theory for a bit.
+
+<br>
+
+### Theory Section - Python Asyncio and Concurrent Code
+
+<br>
+
+A quick bit of terminology. In programming, concurrency means:
+
+> Executing multiple tasks at the same time but not necessarily simultaneously
+
+<br>
+
+On the other hand, doing things in parallel means:
+
+> Parallelism means that an application splits its task up into smaller subtasks which can be processed in parallel, for instance on multiple CPUs at the exact same time.
+
+<br>
+
+More pithily:
+
+> Concurrency is about dealing with lots of things at once. Parallelism is abut doing lots of things at once.
+
+This `stackoverflow thread` has some great further rading in the answers/comments.
+
+For years, options for writing asynchronous code in Python were suboptimal - relying on the limited `asyncore` and `asynchat` modules (both now deprecated) or third-party libraries like `gevent` or `Twisted`. The in Python 3.4 the `asyncio` library was introduced. This was one of the most significant additions to the Python language in its history, and from the initial `PEP-3156` (well worth a read), there were many subsequent improvements, such as the introduction of `async` and `await` syntax in `PEP-492`. These changes to the language have resulted in a sudden Python ecosystem renaissance, as new tools which make use of `asyncio` were (and continue to be) introduced, and other libraries are updated to make use of the new capabilities. FastAPI and Starlette (which is the foundation of FastAPI) are examples of these new projects.
+
+By leveraging Python's new Asynchronous IO (async IO) paradigm (which exists in many other languages), FastAPI has been able to come up with very impressive benchmarks (on par with nodejs or golang):
+
+![](https://christophergs.com/assets/images/fastapi_flask_post/benchmarks.jpeg)
+
+> Naturally, benchmarks should be taken with a pinch of salt, have a `look at the source of these`
+
+<br>
+
+Async IO is a great fit for IO-bound network code (which is most APIs), where you have to wait for something, for example:
+
+- Fetching data from other APIs
+- Receiving data over a network (e.g. from a client browser)
+- Querying a database
+- Reading the contents of a file
+
+<br>
+
+Async IO is not threading, nor is it multiprocessing. In fact, async IO is a single-threaded, single-process design: it uses cooperative multitasking. For more on the trade-offs of these different approaches see this `great article`.
+
+If you're still confused check out two great analogies:
+- `Miguel Grinberg's multiple chess games analogy`
+- `Sebastián Ramírez (Tiangolo)'s fast food analogy`
+
+<br>
+
+In any Python program that uses `asyncio`, there will be an `asyncio event loop`
+
+> The event loop is the core of every asyncio application. Event loops run asynchronous tasks and callbacks, perform network IO operations, and run subprocesses.
+
+<br>
+
+With basic examples, you'll see this kind of code:
+
+~~~
+async def main():
+    await asyncio.sleep(1)
+    print('hello')
+
+asuncio.run(main())
+~~~
+
+<br>
+
+When you see a function defined with `async def` it is a special function called a `coroutine`. The reason why coroutines are special is that they can be paused internally, allowing the program to execute them in increments via multiple entry points for suspending and resuming execution. This is in contrast to normal functions which only have one entry point for execution.
+
+Where you see the `await` keyword, this is instructing the program that is a "suspendable point" in the coroutine. It's a way for you to tell Python "this bit might take a while, fell free to go and do something else".
+
+In the above code snippet, `asyncio.run` is the highlevel API for executing the coroutine and also managing the asyncio event loop.
+
+With FastAPI (and uvicorn our ASGI server), the management of the event loop is taken care of for you. This means that the main things we need to concern ourselves with are:
+
+- Declaring API path operation endpoint functions (and any downstream functions they depend on) as coroutines via `async def` where appropriate. If you do this wrong, FastAPI is still able to handle it, you just won't get the performance benefits.
+- Declaring particular points as awaitable via the `await` keyword within the coroutines.
+
+<br>
+
+### Practical Section - Async IO Path Operations
+
+Let's take a look at the new additions to the app directory in part-9:
+
+~~~
+├── app
+│  ├── __init__.py
+│  ├── api
+│  │  ├── __init__.py
+│  │  ├── api_v1               
+│  │  │  ├── __init__.py
+│  │  │  ├── api.py            
+│  │  │  └── endpoints         
+│  │  │     ├── __init__.py
+│  │  │     └── recipe.py      ----> UPDATED
+│  │  └── deps.py
+│  ├── backend_pre_start.py
+│  ├── core                    
+│  │  ├── __init__.py
+│  │  └── config.py            
+│  ├── crud
+│  │  ├── __init__.py
+│  │  ├── base.py
+│  │  ├── crud_recipe.py
+│  │  └── crud_user.py
+│  ├── db
+│  │  ├── __init__.py
+│  │  ├── base.py
+│  │  ├── base_class.py
+│  │  ├── init_db.py
+│  │  └── session.py
+│  ├── initial_data.py
+│  ├── main.py                 ----> UPDATED
+│  ├── models
+│  │  ├── __init__.py
+│  │  ├── recipe.py
+│  │  └── user.py
+│  ├── schemas
+│  │  ├── __init__.py
+│  │  ├── recipe.py
+│  │  └── user.py
+│  └── templates
+│     └── index.html
+├── poetry.lock
+├── prestart.sh
+├── pyproject.toml
+├── README.md
+└── run.sh
+~~~
+
+To follow along:
+
+- Clone the tutorial `project repo`
+- `cd` into part-9
+- `pip install poetry`  (if you don't have it already)
+- `poetry install`
+- `poetry run ./prestart.sh` (sets up a new DB in this directory)
+- `poetry run ./run.sh`
+- Open http://localhost:8001
+
+<br>
+
+You should be greeted by our usual server-side rendered HTML:
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-8/root-route.png)
+
+<br>
+
+So far no change. Now navigate to the interactive swagger UI docs at `http://localhost:8001/docs`. You'll notice that the recipe REST API endpoints now include:
+- `/api/v1/recipes/ideas/async`
+- `/api/v1/recipes/ideas`
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-9/new-recipe-endpoints.jpeg)
+
+<br>
 
 
 
