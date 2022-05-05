@@ -1905,6 +1905,294 @@ Every library that you attempt to `await` needs to support async IO. Many do not
 We'll be looking at this later in the tutorial series in the advanced part.
 
 
+<br>
+
+## Part 10 - Auth via JSON Web Token (JWT)
+
+<br>
+
+### Theory Section - JWT Auth Overview
+
+<br>
+
+#### What do We Mean by Auth: Authentication vs. Authorization
+
+<br>
+
+When people talk about "auth" they are talking about:
+
+1. Authentication: Determines whether users are who they claim to be
+2. Authorization: Determines what users can and cannot acces
+
+<br>
+
+In short, access to a resource is protected by both authentication and authorization. If you can't prove your identity, you won't be allowed into a resource. And even if you can prove your identity, if you are not authorized for that resource, you will still be denied access.
+
+Most of what we're covering in this tutorial is authentication, but it lays the foundation necessary for authorization.
+
+#### What's a JWT?
+
+<br>
+
+JSON Web Token (JWT, stupidly pronounced "jot") is an open standard (`RFC 7519`) that defines a way for transmitting information - like authentication and authorization facts - between two parties: an issuer and an audience. Communication is safe because each token issued is digitally signed, so the consumer can verify if the token is authentic or has been forged. There are quite a few different ways to sign the token which are `discussed in more detail in here` (link)
+
+A JSON Web Token is basically a long encoded text string. This string is consists of threee smaller parts, separated by a period. These parts are:
+
+- The header
+- A payload or body
+- A signature
+
+<br>
+
+Therefore, tokens will look like this: `header.payload.signature`
+
+JSON web tokens are not "secrets" (unless you choose to encrypt them) like API tokens. However, because they are signed they cannot be easily tampered with - this is their value. JWTs are designed to be passed around. In fact, here is one for our example app which you can copy and paste into `jwt.io` to play with:
+
+~~~
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiYWNjZXNzX3Rva2VuIiwiZXhwIjoxNjI5NzMyNzY2LCJpYXQiOjE2MjkwNDE1NjYsInN1YiI6IjUifQ.rJCd2LxtEn5hJz3OASul0bhHf2GlFKfCNNk48q0pb4o
+~~~
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/jwt-io.jpeg)
+
+<br>
+
+Notice the decoded section on the right consist of three parts.
+
+
+#### Why Use JWTs?
+
+<br>
+
+It all comes down to state. The HTTP protocal is stateless, so when calling protected API endpoints our options are:
+
+1. Send a username/password for `every request`
+2. Something smarter than (1)
+
+<br>
+
+With JWTs, the client (e.g. a user's browser) will store a copy of the JWT after logging in and then include it in subsequent request headers. On the server, this token is decoded and verified. This means there is no need for every protected endpoint request to include login credentials.
+
+Typical JWT auth use cases include:
+
+- A non-server-side rendered web frontend, such as one written in a frontend framework like React, Angular or Vue.
+- A backend microservice
+- An external service
+- A mobile app
+- A desktop app
+
+<br>
+
+This tutorial serie's project, a recipe API, is a realistic scenario where we would want an auth solution.
+
+There are alternatives to JWTs such as:
+- Fernet
+- Branca
+- Platform-Agnostic Security Tokens(PASETO)
+
+<br>
+
+The pros and cons of these `alternatives are discussed here` (link). I am not a security expert, so do your research. This post assumes that you have decided to go down the JWT route (which is very popular). Let's get coding!
+
+<br>
+
+### Pratical Section 1 - Implementing JWT Auth Endpoints - Sign Up Flow
+
+<br>
+
+Let's take a look at the new additions to the app directory in part 10:
+
+~~~
+./app
+├── __init__.py
+├── api
+│  ├── __init__.py
+│  ├── api_v1
+│  │  ├── __init__.py
+│  │  ├── api.py          ----> UPDATED
+│  │  └── endpoints
+│  │     ├── __init__.py
+│  │     ├── auth.py      ----> ADDED
+│  │     └── recipe.py
+│  └── deps.py            ----> UPDATED
+├── backend_pre_start.py  ----> UPDATED
+├── core
+│  ├── __init__.py
+│  ├── auth.py            ----> ADDED
+│  ├── config.py          ----> UPDATED
+│  └── security.py        ----> ADDED
+├── crud
+│  ├── __init__.py
+│  ├── base.py
+│  ├── crud_recipe.py
+│  └── crud_user.py       ----> UPDATED
+├── db
+│  ├── __init__.py
+│  ├── base.py
+│  ├── base_class.py
+│  ├── init_db.py
+│  └── session.py
+├── initial_data.py
+├── main.py
+├── models
+│  ├── __init__.py
+│  ├── recipe.py
+│  └── user.py            ----> UPDATED
+├── schemas
+│  ├── __init__.py
+│  ├── recipe.py
+│  └── user.py            ----> UPDATED
+└── templates
+   └── index.html
+~~~
+
+<br>
+
+To follow along:
+
+- Clone the tutorial `project repo`
+- cd into part-10
+- pip install poetry (if you don’t have it already)
+- poetry install
+- If you’re continuing from part 9, remove your SQLite database rm example.db as we’ve made some breaking changes to the DB schema (ignore if you’re starting here)
+- poetry run ./prestart.sh (sets up a new DB in this directory)
+- poetry run ./run.sh
+- Open http://localhost:8001
+
+<br>
+
+To begin, we've added three new endpoints to our recipe API. These are in the `app/api_v1/endpoints/auth.py` module. We'll start by considering the new `/sigup` POST endpoint where we will create new users:
+
+~~~
+@router.post("/sigup", response_module=schemas.User, status_code=201) #[1]
+def create_user_sigup(
+    *,
+    db: Session = Depends(deps.get_db) #[2]
+    user_in: schemas.user.UserCreate, #[3]
+) -> Any:
+    """
+    Create new user without the need to be logged in.
+    """
+
+    user = db.query(User).filter(User.email == user_in.email).first() #[4]
+    if user:
+        raise HTTPException( #[5]
+            status_code = 400,
+            detail = "The user with this email already exists in the system",
+        )
+    user = crud.user.create(db=db, obj_in=user_in) #[6]
+
+    return user
+~~~
+<br>
+
+1. As show in `Part 4 of the series` we specify a Pydantic `response_model` which shapes the endpoint JSON response.
+2. As show in `Part 7 of the series` we specify the database as a dependecy of the endpoint via FastAPI's dependecy injection capabilities.
+3. The POST request body is validated according to the `UserCreate` pydantic schema. There are some really powerfull tweaks we've made in the user schemas we will cover shortly.
+4. As covered in `Part 7 of the series` we use the SQLAclhemy ORM to query the database `user` table, applying a filter to check if any users with the requested email already exist.
+5. In order to ensure user emails are unique, if a matching user is found (i.e. an existing user with the same email address) then we return an HTTP 400 (as show in `Part 5: Basic Error Handling`)
+6. Finally, if the user email is unique we proceed to use the `crud` utility functions to create the user. We'll take a look at this now.
+
+<br>
+
+If we follow the code logic, we arrive at the call to `crud.user.create(db=db, obj_in=user_in)`. let's take a look at this code in `app/crud/crud_user.py`:
+
+~~~
+from typing import ANy, Dict, Optiona, Union
+
+from sqlalchemy.orm import Session
+
+from app.crud.base import CRUDBase
+from app.models.user import User
+from app.schemas.user import UserCreate, UserUpdate
+from app.core.security import get_password_hash
+
+class CRUDUser(CRUDBase[User, Usercreate, UserUpdate]):
+    def get_by_email(
+        self,
+        db: Session,
+        *,
+        email: str
+    ) -> Optional[User]:
+        return db.query(User).filter(User.email == email).first()
+
+    def create(
+        self,
+        db: Session,
+        *,
+        obj_in: UserCreate
+    ) -> User:
+        create_data = obj_in.dict()
+        create_data.pop("password")
+        db_ojb = User(**create_data)
+        db_obj.hashed_password = get_password_hash(obj_in.password)
+        db.add(db_obj)
+        db.commit()
+
+        return db_obj
+    # Skipping...
+user = CRUDUser(User)
+~~~
+
+<br>
+
+We need to consider this code alongside the updated `UserCreate` schema in `app/schemas/user.py` which now includes the `password` field:
+
+~~~
+# Properties to receive via API on creation
+class UserCreate(UserBase):
+    email: EmailStr
+    password: str
+~~~
+<br>
+
+Crucially, you'll note that in the `create` method (note that we're `overriding` the parent `CRUDBase` method), we convert the Pydantic model to a dictionary by calling `obj_in.dict()` and the remove the `password` entry from the dictionary via `.pop()`. Then to generate the hashed password we call a new method `get_password_hash`. Let's look at this function next.
+
+When a password has been "hashed" it means it has been turned into a scrambled representation of itself. A user's password is taken and - using a key known to the site - the hash value is derived from the combination of both the password and the key, using a set algorithm. IN the recipe API, we'll use the `passlib` library to help us with this functionality. From the docs:
+
+
+> Passlib is a password hashing library for Python 2 & 3, which provides cross-platform implementations of over 30 password hashing algorithms, as well as a framework for managin existing password hashes. It's designed to be useful for a wide range of tasks, from verifying a hash found in /etc/shadow, to providing full-strength password hashing for multi-user application.
+
+<br>
+
+This library can be seen in use in the `app/core/security.py` module:
+
+~~~
+
+~~~
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
