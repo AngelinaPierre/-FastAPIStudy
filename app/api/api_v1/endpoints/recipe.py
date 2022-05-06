@@ -1,9 +1,5 @@
 import asyncio
-from email import header
-from re import sub
 from typing import Any, Optional
-from urllib import response
-from webbrowser import get
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -13,8 +9,8 @@ from app import crud
 from app.api import deps
 from app.schemas.recipe import Recipe, RecipeCreate, RecipeSearchResults
 
-
 router = APIRouter()
+RECIPE_SUBREDDITS = ["recipes", "easyrecipes", "TopSecretRecipes"]
 
 
 @router.get("/{recipe_id}", status_code=200, response_model=Recipe)
@@ -40,7 +36,7 @@ def fetch_recipe(
 @router.get("/search/", status_code=200, response_model=RecipeSearchResults)
 def search_recipes(
     *,
-    keyword: Optional[str] = Query(None, min_length=3, example="chicken"),
+    keyword: str = Query(None, min_length=3, example="chicken"),
     max_results: Optional[int] = 10,
     db: Session = Depends(deps.get_db),
 ) -> dict:
@@ -48,11 +44,9 @@ def search_recipes(
     Search for recipes based on label keyword
     """
     recipes = crud.recipe.get_multi(db=db, limit=max_results)
-    if not keyword:
-        return {"results": recipes}
-
     results = filter(lambda recipe: keyword.lower() in recipe.label.lower(), recipes)
-    return {"results": list(results)[:max_results]}
+
+    return {"results": list(results)}
 
 
 @router.post("/", status_code=201, response_model=Recipe)
@@ -67,10 +61,10 @@ def create_recipe(
     return recipe
 
 
-async def get_reddit_top_async(subreddit: str, data: dict) -> None:
+async def get_reddit_top_async(subreddit: str) -> list:
     async with httpx.AsyncClient() as client:
         response = await client.get(
-            f"http://www.reddit.com/r/{subreddit}/top.json?sort=top&t=day&limit=5",
+            f"https://www.reddit.com/r/{subreddit}/top.json?sort=top&t=day&limit=5",
             headers={"User-agent": "recipe bot 0.1"},
         )
 
@@ -81,25 +75,12 @@ async def get_reddit_top_async(subreddit: str, data: dict) -> None:
         title = entry["data"]["title"]
         link = entry["data"]["url"]
         subreddit_data.append(f"{str(score)}: {title} ({link})")
-    data[subreddit] = subreddit_data
+    return subreddit_data
 
 
-@router.get("/ideias/async")
-async def fetch_ideias_async() -> dict:
-    data: dict = {}
-
-    await asyncio.gather(
-        get_reddit_top_async("recipes", data),
-        get_reddit_top_async("easyrecipes", data),
-        get_reddit_top_async("TopSecretRecipes", data),
-    )
-
-    return data
-
-
-def get_reddit_top(subreddit: str, data: dict) -> None:
+def get_reddit_top(subreddit: str) -> list:
     response = httpx.get(
-        f"http://www.reddit.com/r/{subreddit}/top.json?sort=top&t=day&limit=5",
+        f"https://www.reddit.com/r/{subreddit}/top.json?sort=top&t=day&limit=5",
         headers={"User-agent": "recipe bot 0.1"},
     )
     subreddit_recipes = response.json()
@@ -109,14 +90,17 @@ def get_reddit_top(subreddit: str, data: dict) -> None:
         title = entry["data"]["title"]
         link = entry["data"]["url"]
         subreddit_data.append(f"{str(score)}: {title} ({link})")
-    data[subreddit] = subreddit_data
-
-@router.get("/ideias/")
-def fetch_ideias() -> dict:
-    data: dict = {}
-    get_reddit_top("recipes", data)
-    get_reddit_top("easyrecipes", data)
-    get_reddit_top("TopSecretRecipes", data)
+    return subreddit_data
 
 
-    return data
+@router.get("/ideas/async")
+async def fetch_ideas_async() -> dict:
+    results = await asyncio.gather(
+        *[get_reddit_top_async(subreddit=subreddit) for subreddit in RECIPE_SUBREDDITS]
+    )
+    return dict(zip(RECIPE_SUBREDDITS, results))
+
+
+@router.get("/ideas/")
+def fetch_ideas() -> dict:
+    return {key: get_reddit_top(subreddit=key) for key in RECIPE_SUBREDDITS}

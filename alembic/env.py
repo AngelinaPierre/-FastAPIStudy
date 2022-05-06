@@ -19,13 +19,13 @@ fileConfig(config.config_file_name)
 # target_metadata = None
 
 from app.db.base import Base  # noqa
-from app.db.session import SQLALCHEMY_DATABASE_URI
+from app.core.config import settings
 
 target_metadata = Base.metadata
 
 
 def get_url():
-    return SQLALCHEMY_DATABASE_URI
+    return settings.SQLALCHEMY_DATABASE_URI
 
 
 def run_migrations_offline():

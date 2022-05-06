@@ -5,22 +5,16 @@ from fastapi import FastAPI, APIRouter, Request, Depends
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
-
-# from app import
 from app import crud
 from app.api import deps
 from app.api.api_v1.api import api_router
 from app.core.config import settings
 
-
-# Project Directories
-# ROOT = Path(__file__).resolve().parent.parent
 BASE_PATH = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_PATH / "templates"))
 
-
 root_router = APIRouter()
-app = FastAPI(title="Recipe API")
+app = FastAPI(title="Recipe API", openapi_url=f"{settings.API_V1_STR}/openapi.json")
 
 
 @root_router.get("/", status_code=200)
@@ -34,13 +28,10 @@ def root(
     recipes = crud.recipe.get_multi(db=db, limit=10)
     return TEMPLATES.TemplateResponse(
         "index.html",
-        {
-            "request": request,
-            "recipes": recipes,
-        },
+        {"request": request, "recipes": recipes},
     )
 
-# MIDDLEWARE
+
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
     start_time = time.time()
@@ -52,6 +43,7 @@ async def add_process_time_header(request: Request, call_next):
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
 app.include_router(root_router)
+
 
 if __name__ == "__main__":
     # Use this for debugging purposes only
