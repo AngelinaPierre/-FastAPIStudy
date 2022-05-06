@@ -2215,8 +2215,40 @@ from fastapi.security import OAuth2PasswordRequestForm
 @router.post("/login")
 def login(
     db: Session = Depends(deps.get_db), forma_data: OAuth2PasswordRequestForm = Depends() #[1]
-)
+) -> Any:
+    """
+    Get the JWT for a user with data from OAuth2 request
+    """
+
+    user = authenticate(email=form_data.username, password=form_data.password, db = db) #[2]
+    if not user:
+        raise HTTPException(status_code=400, detail="Incorrect username or password) #[3]
+    
+    return {
+        "access_token": create_access_token(sub=user.id), #[4]
+        "token_type": "bearer",
+    }
+# Skipping...
 ~~~
+
+<br>
+
+Notice that we use FastAPI's `OAuth2PasswordRequestForm dependency` in the path operation function.
+
+`OAuth2PasswordRequestForm` is a class dependency that declares a form body with:
+- The username.
+- The password.
+- An optional grant_type
+- An optional scope field as a big string, composed of strings separated by spaces. (not required for our example)
+- An optional client_id (not required for our example).
+- An optional client_secret (not required for our example).
+
+<br>
+
+Let's break the endpoint logic down:
+
+1. We declare the `OAuth2PasswordRequestForm` dependency
+2. We check the request body via a new `authenticate` function (we'll look at this in a moment)
 
 
 
