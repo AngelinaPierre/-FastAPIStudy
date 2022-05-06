@@ -2157,9 +2157,66 @@ When a password has been "hashed" it means it has been turned into a scrambled r
 This library can be seen in use in the `app/core/security.py` module:
 
 ~~~
+from passlib.context import CryptContext
 
+PWD_CONTEXT = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def verify_password(plain_password: str, hashed_password:str) -> bool:
+    return PWD_CONTEXT.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return PWD_CONTEXT.hash(password)
+
+#Skipping...
 ~~~
 
+<br>
+
+Here the `CryptContext` class from `passlib` is used to hash and verify user passwords.
+
+The last step in the user creation flow is updating our database. We'll have to make one change to the `user` table:
+
+~~~
+class User(Base):
+    id = Column(Integer, primary_key=True, index=True)
+    first_name = Column(String(256), nullable=True)
+    surname = Column(String(256), nullable=True)
+    email = Column(String, index=True, nullable=False)
+    is_superuser = Column(Boolean, default=False)
+    recipes = relationship(
+        "Recipe",
+        cascade="all, delete-orphan",
+        back_populates="submitter",
+        uselist=True,
+    )
+
+    # New Addition
+    hashed_password = Column(String, nullable=False)
+~~~
+
+<br>
+
+Notice the new column `hashed_password`.
+
+So this is our flow to create a user. Those following along from previous tutorial posts will note that i've tweaked the alembic migration and the `app/db/init_db.py` script to accomodate creating users with a password.
+
+<br>
+
+### Pratical Section 2 - Implementing JWT Auth Endpoints - Login Flow
+
+<br>
+
+Next, let's consider the new `/login` endpoint:
+
+~~~
+from fastapi.security import OAuth2PasswordRequestForm
+#Skipping...
+
+@router.post("/login")
+def login(
+    db: Session = Depends(deps.get_db), forma_data: OAuth2PasswordRequestForm = Depends() #[1]
+)
+~~~
 
 
 
