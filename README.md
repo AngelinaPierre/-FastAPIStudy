@@ -2249,30 +2249,200 @@ Let's break the endpoint logic down:
 
 1. We declare the `OAuth2PasswordRequestForm` dependency
 2. We check the request body via a new `authenticate` function (we'll look at this in a moment)
+3. If authentication fails, no user is returned, this triggers an HTTP 400 response.
+4. Finally, the JSON web token is created and returned to the client via the `create_access_token` function (we'll look at this in a moment).
+
+<br>
+
+Both of the new functions in the above list (`authenticate` and `create_access_token`) are from the new `app/core/auth.py`
+module. Let's consider this module in its entirety now. You'ill note that at this point in the tutorial series we've introduced another external dependency, `pyhon-jose` which provides us with a variety of cryptographic backends for encrypting and signing tokens.
+
+~~~
+from typing import Optional, MutableMapping, List, Union
+from datetime import datetime, timedelta
+
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm.session import Session
+from jose import jwt
+
+from app.models.user import User
+from app.core.config import settings
+from app.core.security import verify_password
+
+JWTPayloadMapping = MutableMapping[
+    str, Union[datetime, bool, str, List[str], List[int]]
+]
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
+
+def authenticate(
+    *,
+    email: str,
+    password: str,
+    db: Session,
+) -> Optional[User]:
+    user = db.query(User).filter(user.email == email).first()
+    if not user:
+        return None
+    if not verify_password(password, user.hashed_password): #[1]
+        return None
+    return user
 
 
+def create_access_token(*,sub: str) -> str: #[2]
+    return _create_token(
+        token_type="access_token",
+        lifetime=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES), #[3]
+        sub=sub,
+    )
+
+def _create_token(
+    token_type: str,
+    lifetime: timedelta,
+    sub: str,
+) -> str:
+    payload = {}
+    expire = datetime.utcnow() + lifetime
+    payload["type"] = token_type
+    payload["exp"] = expire #[4]
+    payload["iat"] = datetime.utcnow() #[5]
+    payload["sub"] = str(sub) #[6]
+
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.ALGORITHM) #[7]
+~~~
+
+<br>
+
+Quite a lot is happening here, let's break it down:
+
+1. We use the verify_password function we looked at earlier in `app/core/security.py` which leverages the passlib library.
+2. The `sub` keyword argument to the `create_access_token` function will correspond to the user ID.
+3. The `app/core/config.py` is updated to include some auth-related settings, such the JWT validity timeframe before expiry
+4. We construct the JWT. There are a number of required/optional fields( known as "claims") detailed in `RFC 7519`. The "exp" (expiration time) claim identifies the expiration time on or after which the JWT MUST NOT be accepted for processing.
+5. The "iat" (issued at) claim identifies the time at which the JWT was issued.
+6. The "sub" (subject) claim identifies the principal that is the subject of the JWT. THis will be the user ID in our case.
+
+<br>
+
+If the user passes the authentication check, the `/login` endpoint return the JWT to the client. This JWT can then be used to access restricted functionality. A basic example of this is found in the third new endpoint:
+
+~~~
+@router.get("/me", response_model=schemas.User)
+def read_users_me(current_user: User = Depends(deps.get_current_user)):
+    """
+    Fetch the current logged in user.
+    """
+
+    user = current_user
+    return user
+~~~
+
+<br>
+
+Up until now, the only dependency injection we've used has been for accessing the database, but we can also use it for other things, like fetching the logged-in user. We'll explore this in more detail in the next post of the series on dependency injection.
+
+The key code to note from the updated `app/deps.py` module is here:
+
+~~~
+def get_current_user(
+    db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)
+) -> User:
+    # Skipping for simplicity...
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET,
+            algorithms=[settings.ALGORITHM],
+            options={"Verify_aud": False},
+        )
+        username: str = payload.get("sub")
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+    user = db.query(User).filter(User.id == token_data.username).first()
+    if user is None:
+        raise credentials_exception
+    return user
+    # Skipping for simplicity...
+~~~
+
+<br>
+
+Here the incoming JWT token is decoded ( again using python-jose), with the combination of a `JWT-SECRET` value set in the API `app/core/config.py` as well as the encoding algorithm configured there (HS256). If this decoding is successful we "trust" the token, and are happy to fetch the user from the database.
+
+For now, let's try out the whole auth flow locally:
+
+- Clone the tutorial project repo
+- cd into part-10
+- pip install poetry (if you don’t have it already)
+- poetry install
+- If you’re continuing from part 9, remove your SQLite database rm example.db as we’ve made some breaking changes to the DB schema (ignore if you’re starting here)
+- poetry run ./prestart.sh (sets up a new DB in this directory)
+- poetry run ./run.sh
+- Open http://localhost:8001/docs
+
+<br>
+
+You should see the new endpoints:
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/new-auth-endpoints.jpeg)
 
 
+<br>
 
+Let's curl `api/v1/auth/me` endpoint via the `Try Me` button:
 
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/auth-me-endpoint.jpeg)
 
+<br>
 
+When you hit this endpoint, you should see the response is a 401 Unauthorized:
 
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/not-authenticated.jpeg)
 
+<br>
 
+To fix this, we will first create a user via the `api/v1/auth/signup` endpoint. Once again use the `Try Me` functionality and populate the request body fields (first)name, surname, email, password) then click "execute";
 
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/create-user.jpeg)
 
+<br>
 
+If you scroll down, you should see in the response that your user has been created:
 
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/create-response.jpeg)
 
+<br>
 
+Next, we'll make use of a useful swagger interactive UI feature to Authorize a user. Click on the `Authorize` button in the top right:
 
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/authorize-button.jpeg)
 
+Enter the credentials (note you should enter the `email address in the username field`) than click "Authorize":
 
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/filled-authorize.jpeg)
 
+<br>
 
+You should see that you are logged in. Now if you try the `api/v1/auth/me` endpoint again, you should get a 200 response with the user details in the response body:
 
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-10/successful-call.jpeg)
 
+<br>
+
+Congrats! You now have basic auth working in your FastAPI application!
+
+There are more complicated features we could add like:
+- Using scopes for authorization
+- Refresh tokens
+- Password resets
+- Single Sign On (SSO)
+- Adding custom data to the JWT payload
+- JSON Web Encryption
+
+<br>
+
+We'll be looking at all of this in the tutorial series in the advanced part.
 
 
 
