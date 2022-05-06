@@ -1,3 +1,4 @@
+# Central location where our dependencies are defined
 from typing import Generator, Optional
 
 from fastapi import Depends, HTTPException, status
@@ -9,12 +10,15 @@ from app.core.auth import oauth2_scheme
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.user import User
+from app.clients.reddit import RedditClient
+from app import crud
 
 
 class TokenData(BaseModel):
     username: Optional[str] = None
 
 
+# function to inject our database session into the path operation functions
 def get_db() -> Generator:
     db = SessionLocal()
     db.current_user_id = None
@@ -22,6 +26,10 @@ def get_db() -> Generator:
         yield db
     finally:
         db.close()
+
+
+def get_reddit_client() -> RedditClient:
+    return RedditClient()
 
 
 async def get_current_user(
@@ -50,3 +58,14 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+
+
+def get_current_active_superuser(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    if not crud.user.is_superuser(current_user):
+        raise HTTPException(
+            status_code= 400,
+            detail = "The user doesn't have enough privileges"
+        )
+    return current_user

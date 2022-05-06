@@ -20,6 +20,10 @@ class RecipeUpdate(RecipeBase):
     label: str
 
 
+class RecipeUpdateRestricted(BaseModel):
+    id: int
+    label: str
+
 # Properties shared by models stored in DB
 class RecipeInDBBase(RecipeBase):
     id: int
