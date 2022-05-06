@@ -2444,6 +2444,465 @@ There are more complicated features we could add like:
 
 We'll be looking at all of this in the tutorial series in the advanced part.
 
+<br>
+
+## Part 11 - Dependency Injection via FastAPI Depends
+
+<br>
+
+### Theory Section - What is Dependency Injection
+
+<br>
+
+Dependency injection (DI) is a way for your code functions and/or classes to declare things they need to work.
+
+If you want to get more technical: Dependency injection relies on composition, and is a method for achieving `inversion of control`.
+
+FasAPI has an elegant and simple `dependency injection system`. It is my favorite feature of the framework. You can declare dependencies in your `path operation functions`, i.e. the decorated functions which define your API endpoints. Typical examples of the sorts of dependencies you might want to inject:
+- Database connections
+- Auth/security requirements (e.g. getting user credentials, checking the user is active, checking user access level)
+- Clients for interacting with other services (e.g. AWS services, email marketing services, a CMS)
+- Virtually any shared code logic.
+
+<br>
+
+These dependencies only need to be declared once and then referenced elsewhere in the codebase, so DI makes your code less repetitive and easier to understand. DI is also extremely useful for testing, because you can inject test `doubles` into your objects which reduces unwieldy `monkey patching`. We'll look at an example of this in the second part of the post. Let's start Looking at some examples.
+
+<br>
+
+### Practical Section 1 - Using Di in FastAPI
+
+<br>
+
+To begin, i'll flag which files have changed in the accompanying example code repo `app` directory in this part compared to the previous part:
+
+~~~
+./app
+├── __init__.py
+├── api
+│  ├── __init__.py
+│  ├── api_v1
+│  │  ├── __init__.py
+│  │  ├── api.py
+│  │  └── endpoints
+│  │     ├── __init__.py
+│  │     ├── auth.py      
+│  │     └── recipe.py    ----> UPDATED
+│  └── deps.py            ----> UPDATED
+├── clients               ----> ADDED
+│  ├── __init__.py          
+│  └── reddit.py          ----> ADDED
+├── core
+│  ├── __init__.py
+│  ├── auth.py            
+│  ├── config.py          
+│  └── security.py
+├── crud
+│  ├── __init__.py
+│  ├── base.py
+│  ├── crud_recipe.py
+│  └── crud_user.py
+├── db
+│  ├── __init__.py
+│  ├── base.py
+│  ├── base_class.py
+│  ├── init_db.py
+│  └── session.py
+├── models
+│  ├── __init__.py
+│  ├── recipe.py
+│  └── user.py            ----> UPDATED
+├── schemas
+│  ├── __init__.py
+│  ├── recipe.py
+│  └── user.py            ----> UPDATED
+├── templates
+|   └── index.html
+└── tests                   ----> ADDED
+│  ├── conftest.py          ----> ADDED
+│  └── api                  ----> ADDED
+│      ├── __init__.py
+│      └──  test_recipe.py  ----> ADDED
+├── backend_pre_start.py
+├── initial_data.py
+└── main.py
+~~~
+
+<br>
+
+So far in the tutorial series, we've already started using FastAPI's dependency injection system for our database session and auth. Let's revisit these and the look at a new example.
+
+#### Injecting The Database Session Dependency
+
+<br>
+
+In `app/api/deps.py` we have a central location where our dependencies are defined. In previous sections we've defined this function to inject our database session into the path operation functions:
+
+~~~
+def get_db() -> Generator:
+    db = SessionLocal()
+    db.current_user_id = None
+    try:
+        yield db
+    finally:
+        db.close()
+~~~
+<br>
+
+Then we make use of the DB session like so (example taken from `app/api/api_v1/endpoints/recipe.py`):
+
+~~~
+from fastapi import Depends
+#other imports skipped for brevity
+
+@router.get("/{recipe_id}", status_code = 200, response_model=Recipe)
+def fetch_recipe(
+    *,
+    recipe_id: int,
+    db: Session = Depends(deps.get_db), #[1] The dependency injection
+) -> Any:
+    """
+    Fetch a single recipe by ID
+    """
+    result = crud.recipe.get(db=db, id=recipe_id) #[2] Using the dependency
+    # code continues...
+~~~
+
+<br>
+
+You can see at note [1] in this code snippet the structure for a dependency injection in FastAPI:
+- Define a `callable` (usually a function, but it can also be a `class in rarer cases`) which returns or yields*** the instantiated object (or simple value) you wish to inject
+- Add a parameter to your path operation function (i.e. the decorated API endpoint function), using the FastAPI `Depends` class to define the parameter, and passing your function to the `Depends` class.
+
+***Note that the typical use-case for a dependency function uses `yield` is where you are doing extra steps after finishing (such as closing a DB connection, clean up, some state mutation).
+
+The dependency is the available for use, as show at note [2] in the code snippet above, where the database session is passed to the crud utility method (which in turn performs a database query via the session, see the `source code`).
+
+There is no "registration" (or similar) process for your functions, FastAPI takes care of that for you under the hood. As `per the docs` it is up to you whether you want your dependency functions to be async or not.
+
+<br>
+#### A new Dependency Injection Example - Reddit Client
+
+<br>
+
+In part 11, the example code has changed with the addition of a reddit client dependency. The `get_reddit_top` function used in the `recipe/ideas` endpoint has been replaced. Instead, we've now defined a reddit client in `app/clients/reddit.py`:
+
+~~~
+# reddit.py
+
+from httpx import Client, Response
+
+class RedditClient:
+    base_url: str = "https://www.reddit.com"
+    base_error = t.Type[RedditClientError] = RedditClientError
+
+    def __init__(self) -> None:
+        self.session = Client() #[1]
+        self.session.headers.update(
+            {
+                "Content-type": "application/json",
+                "User-agent": "recipe bot 0.1",
+            }
+        )
+    
+    def _perform_request(
+        self, method: str, path: str, *args, **kwargs
+    ) -> Response:
+        res = None
+        try:
+            res = getattr(self.session, method)(
+                f"{self.base_url}{path}", *args, **kwargs
+            ) #[2]
+            res.raise_for_status() #[3]
+        except HTTPError:
+            raise self.base_error(
+                f"{self.__class__.__name__} request failure:\n"
+                f"{method.upper()}: {path}\n"
+                f"Message: {res is not None and res.text}",
+                raw_response = res,
+            )
+        return res
+    
+    def get_reddit_top(
+        self, *, subreddit: str, limit=5
+    ) -> dict:
+        """Fetch the top n entries from a given subreddit"""
+
+        # If you get empty responses from the subreddit calls, set t=month instead.
+        url = f"/r/{subreddit}/top.json?sort=top&t=week&limit={limit}"
+        response = self._perform_request("get", url) #[4]
+        subreddit_recipes = response.json()
+        subreddit_data = []
+        for entry in subreddit_recipes["data"]["children"]:
+            score = entry["data"]["score"]
+            title = entry["data"]["title"]
+            link = entry["data"]["url"]
+            subreddit_data.append(f"{str(score)}: {title} ({link})")
+
+        return subreddit_data #[5]
+~~~
+
+<br>
+
+Let's break this down, as there are a couple of subtleties to this code. Feel free to skip as the key thing to understand is that it's a basic reddit HTTP client:
+
+1. Whilst most Pythonistas are familiar with the popular `requests HTTP client` fewer are familiar with an alternative called `httpx`, which has a similar clean interface but also elegantly supports async. When we use the httpx `Client` this is analagous to requests `Session`, i.e. for `reusing connections via pooling`.
+2. Little bit of an ugly method which uses `getattr` to fish out the appropriate method (`get`,`post` etc.) on the session, then immediately invokes it with the correct URL.
+3. Like requests, `raise_for_status` raises an error on any 4xx or 5xx responses (`docs`)
+4. Usage of the method described in point 2.
+5. The data is now returned instead of just mutating the dictionary as in the previous (sub-optimal) function.
+
+<br>
+
+Great, now that we have our client, we need to update the `deps.py` module to include it:
+
+~~~
+# deps.py
+
+from app.clients.reddit import RedditClient
+
+def get_reddit_client() -> RedditClient:
+    return RedditClient()
+~~~
+<br>
+
+Nice and simple, we return an instance of the reddit client. The last step is to inject the dependency in our path operation function:
+
+~~~
+# api/api_v1/endpoints/recipe.py
+
+from app.api import deps
+
+# code omitted for brevity...
+
+@router.get("/ideas/")
+def fetch_ideas(
+    reddit_client: RedditClient = Depends(deps.get_reddit_client)
+) -> dict:
+    data: dict = {}
+    for subreddit in ["recipes", "easyrecipes", "TopSecretRecipes"]:
+        entry = reddit_client.get_reddit_top(subreddit=subreddit)
+        data[subreddit] = entry
+
+    return data
+~~~
+
+<br>
+
+Now the reddit client is available within the path operation function. Elegant, isn't? For an ideia of what it would take to build this yourself, you can check out `my post on Flask-Injector`.
+
+The next things to do is to run the `example repo` locally. Follow the setup series in the readme to install the dependencies and start the app. Then head over to `http://localhost:8001/docs` for the interactive UI. Find the `/api/v1/recipes/ideias endpoint and click` Try it out, `then` execute.
+
+You should see a response of this format:
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-11/swagger.png)
+
+<br>
+
+Play with the reddit client code (e.g. the parameters in the request in `reddit.py`) to get a feel for how everything hangs together. Experimentation will teach far better than readding.
+
+There is another major benefit to the dependency injection refactoring of the `/recipes/ideas` endpoint, which is in testing. We'll look at that in the second-half of this post. First, let's look at a more complex sub-dependency example.
+
+<br>
+
+#### Using FastAPI Depends Sub-Dependencies - Auth Example
+
+<br>
+
+Your dependencies can also have dependencies. FastApi takes care of solving the hierarchy of dependencies. This adds significant assitional power to the FastAPI DI System. in the `part 10` of the tutorial we saw the `get_current_user` auth dependency:
+
+~~~
+# deps.py (part 10)
+from fastapi import Depends, HTTPexception, status
+from app.core.auth import oauth2_scheme
+#omitted
+
+async def get_current_user(
+    db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)
+) -> User:
+    credentials_exception = HTTPException(
+        status_code = status.HTTP_401_UNAUTHORIZED,
+        detail = "Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET,
+            algorithms=[settings.ALGORITHM],
+            options={"verify_aud": False},
+        )
+        # omitted for brevity....
+~~~
+
+<br>
+
+This makes use of the `FastAPI's OAuth2PasswordBearer` wrapping it, so it can be injected in API endpoints.
+
+But what if we want to increase the specificity of our authorization? Let's look at using a sub-dependency to create a callable which restricts the returned users to superusers:
+
+~~~
+# deps.py (part11)
+# ommited for brevity...
+
+def get_current_active_superuser(
+    current_user: User = Depends(get_current_user), #[1]
+) -> User:
+    if not crud.user.is_superuser(current_user): #[2]
+        raise HTTPException(
+            status_code = 400,
+            detail= "The user doesn't have enough privileges",
+        )
+    return current_user
+~~~
+<br>
+
+Two things to breakdown:
+
+1. We pass a dependency to this function (thereby creating a sub-dependency). In this case it is the original `get_current_user` function. This will make the `current` user instance available for use in the function.
+2. Then we perform an additional check (using the data access utility `CRUDUser` class methods) for whether the user is a superuser.
+
+<br>
+
+Let's see this in the endpoint code:
+
+~~~
+# api/api_v1/endpoints/recipe.py
+# omitted...
+
+@router.get("/ideas/async")
+async def fetch_ideas_async(
+    user: User = Depends(deps.get_current_active_superuser), #[1]
+) -> dict:
+    data: dict = {}
+
+    await asyncio.gather(
+        get_reddit_top_async("recipes", data),
+        get_reddit_top_async("easyrecipes", data),
+        get_reddit_top_async("TopSecretRecipes", data),
+    )
+
+    return data
+~~~
+<br>
+
+We've now updated this endpoint so that any attempt to call it from a user that is not a superuser will be rejected.
+
+You can test this out by running the example repo, then creating a new user (making them a superuser) via the `/api/v1/auth/signup` endpoint (being sure to update the `superuser` field to `true`)
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-11/superuser.png)
+
+<br>
+
+Once you've created the superuser, you can login via the `Authorize` button in the top right of the OpenAPI interactive UI:
+
+![FastAPI dependency tree example](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-11/authize.png)
+
+
+<br>
+
+Without being a logged in superuser, attempts to use the `/ideas/async` endpoint will fail (note, the synchronous endpoint wil still work wothout auth as we have not added the dependency to that path operation function).
+
+You could use this sub-dependency approach to build out complex auth logic, as shown in this diagram:
+
+![](https://christophergs.com/assets/images/ultimate-fastapi-tut-pt-11/tree.png)
+
+
+<br>
+
+And naturally, sub-dependencies are not just limited to auth, you can use them in numerous ways.
+
+<br>
+
+### Practical Section 2 - Dependency Injection Implications for Testing
+
+<br>
+
+In this part we added the first test to our example app. The test runner is pytest.
+
+If you're not familiar with pytest, checkout this `free pytest introduction lecture`(link) from my testing and monitoring ML models course.
+
+For the purposes of this tutorial, the key thing to understand is that test fixtures in pytest are defined by convention in a file called `conftest.py`. So in our loan test file `app/tests/api/test_recipe.py` we have a relatively short bit of code hiding a lot more:
+
+~~~
+# test_recipe.py
+fom app.core.config import settings
+
+def test_fetch_ideas_reddit_sync(client): #[1]
+    # When
+    response = client.get(f"{settings.API_V1_STR}/recipes/ideas/")
+    data = response.json()
+
+    # Then
+    assert response.status_code == 200
+    for key in data.key():
+        assert key in ["recipes", "easyrecipes", "TopSecretRecipes"]
+~~~
+<br>
+
+The key thing to note at comment [1] where the test takes the `client` as its first argument. `client` is a test fixture defined in `conftest.py`:
+
+~~~
+# conftest.py
+from typing import Generator
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.api import deps
+
+async def override_reddit_dependency() -> MagicMock:
+    mock = MagicMock() #[4]
+    reddit_stub = {
+        "recipes": [
+            "baz",
+        ],
+        "easyrecipes"? [
+            "bar",
+        ],
+        "TopSecretRecipes": [
+            "foo"
+        ],
+    }
+    mock.get_reddit_top.return_value = reddit_stub #[5]
+    return mock
+
+
+@pytest.fixture() #[1]
+def client() -> Generator:
+    with TestClient(app) as client: #[2]
+        app.dependency_overrides[deps.get_redit_client] = override_reddit_dependency #[3]
+        yield client #[6]
+        app.dependency_overrides = {} #[7]
+~~~
+<br>
+
+There is a lot happening here, let's break it down by the comment numbers:
+
+1. We use the `pytest fixture decorator` to define a fixture
+2. We access the FastAPI built-in `test client` via a context manager so we can easily perform clean-up (see 7)
+3. We use the `FastAPI app dependency_overrides` to replace dependencies. We replace what the selected dependency (in this case `get_reddit_client`) callable is, pointing to a new callable which will be used in testing (in this case `override_reddit_dependency`)
+4. We make use of the Python standard library unittest mock `MagicMock (docs for those unfamiliar)`(link)
+5. We specify the return value of a particular method in our mocked reddit client (`get_reddit_top`), here it will return dummy data
+6. We `yield` the modified client
+7. We perform clean up on the client, reverting the dependencies.
+
+<br>
+
+This is an illustration of the power of dependency injection in a testing context. Whilst libraries like `request-mock` would also allow you to replace the return value of a particular HTTP call, we can also apply this approach to any callable, whether it's:
+- Interacting with a database
+- Sending emails via SMTP
+- Working with other protocols (e.g. ProtoBuf)
+- Simply calling complex code we don't need to worry about for a particular test.
+
+<br>
+
+Allow with fairly minimal setup, no monkey-patching, and fine-grained control. This is part of a broader pattern in software development: composition over inheritance (`useful Python overview here`).
+
+Hopefully this shows the power and versatility of FastAPI's dependency injection system. learning the value of this approach will save you a lot of pain.
+
 
 
 
